@@ -1,86 +1,31 @@
 package awe::View;
-use Apache::Constants qw(:common REDIRECT BAD_REQUEST OK);
-use Exporter;
-use Apache;
 use strict;
-use awe::Log;
+use awe::Context;
 use awe::Conf;
-use awe::Data;
-
-#use CGI qw(:html);
-use vars qw(@ISA
-						@EXPORT
-						$TEMPLATE
-
-					 );
-
-@ISA = qw(Exporter);
-
-@EXPORT = qw(
-						 template
-						);
-
-$TEMPLATE=undef;
-
-sub init {}
-sub deinit {}
-
-
-sub template {
-	my $name = shift;
-	return $TEMPLATE=undef unless $name;
-	$name=context('object').".$name";
-	my ($templ,$dir)  = ( conf('templates',$name),
-												conf('templates.dir'));
-	my $global_style=conf('templates.*');
-	unless ($templ) {
-		$templ=conf("templates.$name:noglobal");
-		$global_style=0;
-	}
-	fatal(11,$name) unless $templ;
-	my $type=$templ=~s/^([A-Z0-9_]+):\s*//i
-		? $1
-			: conf('templates.type');
-	fatal(44) unless $type;
-	unless ($type eq 'redirect') {
-		my @templ;
-		foreach (split(/\s+/,$templ)) {
-			push @templ,$dir.$_;
-		}
-		push @templ,$dir.$global_style
-			if $global_style;
-		$templ=@templ ? \@templ : undef;
-	}
-	return $TEMPLATE={type    => $type,
-										name    => $name,
-										method  => "awe::View_$type"->can('show') || fatal(12,$type),
-										templ   => $templ || fatal(18,$name)};
-
-}
+use awe::Log;
+use Apache::Constants;
 
 sub show {
-	my $r=arr();
-	# При неустановленном темплейте просто ненадо ничего показывать
-	# при условии конечно что результат не OK
-	unless ($TEMPLATE) {
-		fatal(18) if http_code()==OK;
-		return;
-	}
-	return &{$TEMPLATE->{method}}($TEMPLATE,
-																arr(),
-																output(),
-																outputParams());
+  my $template=shift;
+  # При неустановленном темплейте просто ненадо ничего показывать
+  # при условии конечно что результат не OK
+  unless ($template) {
+    fatal(18) if http_code()==OK;
+    return http_code();
+  }
+  my $method  = "awe::View_$template->{type}"->can('show')
+    || awe::Log::fatal(12,$template->{type});
+	
+  return &$method(apr(),$template,@_);
 }
 
 
-#sub urlenc
-#  {
-#    my $self=shift;
-#    my $s = shift;
-#    $s =~ s/([^\ a-zA-Z0-9\.\*_-])/sprintf "%%%02X", ord $1/eg;
-#    $s =~ tr/ /+/;
-#    return $s;
-#  }
+sub getTemplateDir {
+  my $template=shift;
+  return $template->{dir}
+    || conf("templateType.$template->{type}.dir")
+      || conf('templateType.default.dir');
+}
 
 
 
@@ -88,112 +33,261 @@ sub show {
 # Show templates methods
 ##########################################################
 
+
 package awe::View_error;
-use awe::XML;
-use awe::Data;
+use awe::Context;
 use Apache::Constants qw(:common REDIRECT BAD_REQUEST OK);
 
 
 ## Внимание! Во время вызова этой процедуры все deinit-ено
 
 sub getPage {
-	my $r=shift;
-	my $error=shift;
-	return "<html><h1>Fatal Error</h1><h2>$error</h2></html>";
+  my $error=shift;
+  my $str="<html><h1>Fatal Error</h1><code>$error</code></html>";
+  $str=~s/\n/<br>/g;
+  return $str;
 }
 
 sub show {
-	my ($template,$r,$error)=@_;
+  my ($r,$template,$error)=@_;
 	
-	$r->content_type('text/html');
-	$r->send_http_header;
-	return 1 if
-		my $original_request = $r->prev;
+  $r->content_type('text/html');
+  $r->send_http_header;
+  return 1 if
+    my $original_request = $r->prev;
 	
-	return 1
-		if $r->header_only;
-	$r->print(getPage($r,$error));
-	return http_code(OK);
+  return 1
+    if $r->header_only;
+  $r->print(getPage($error));
+  return SERVER_ERROR;
 }
 
 
-package awe::View_xslt;
-use awe::XML;
+
+################################################################################
+
+package awe::View_tt2;
+use strict;
+use Template;
+use awe::Conf;
+use awe::Log;
+use awe::Context;
+use awe::View;
+use Apache::Constants qw(:common REDIRECT BAD_REQUEST OK);
+
+sub show {
+  my ($r,$template,$result,$data)=@_;
+
+  $r->content_type('text/html');
+  $r->send_http_header;
+  unless ($r->prev || $r->header_only) {
+    my $dir = awe::View::getTemplateDir($template);
+    my $objectsDir = conf('templates.'.context('object').'.DIR');
+    if ($objectsDir) {
+      $objectsDir="$dir$objectsDir" if $objectsDir=~m!^[^/]!;
+      $template->{template}=$objectsDir.$template->{template};
+      $dir="$objectsDir:$dir";
+    }
+    my $tt = Template->
+      new({
+	   OUTPUT      => $r,
+	   COMPILE_DIR => '/tmp/ttc',
+	   COMPILE_EXT => '.ttc',
+	   INTERPOLATE => 1,	# Позволяет использовать $vasya вместо [% vasya %]
+	   POST_CHOMP  => 1,
+	   PRE_CHOMP   => 1,
+	   INCLUDE_PATH=> $dir,
+	   ABSOLUTE    => 1,
+	   TRIM        => 1,	# Удаляет CR/LF
+	   #					 AUTO_RESET  => 1, #?
+	  }) || fatal(49,Template->error());
+
+    $tt->process($template->{template},
+		 {context => context(),
+		  result  => $result,
+		  data    => $data})
+      || fatal(49,$tt->error());
+		
+  }
+		
+  return http_code();
+	
+}
+
+################################################################################
+
+package awe::View_fd;
+use strict;
+
+sub show {
+  my ($r,$template,$data)=@_;
+
+  #	$r->content_type($stylesheet->media_type());
+  $r->send_http_header;
+  $r->send_fd($data)
+    unless $r->prev || $r->header_only;
+  return http_code();
+}
+
+
+################################################################################
+
+package awe::View_file;
+use strict;
+use awe::Context;
+use Apache::Constants;
+use Apache::Constants qw(:response :methods :http);
+use Apache::File ();
+use Apache::Log ();
+
+sub show {
+  my ($r,$template,$result,$data)=@_;
+
+  $result={file=>$result} unless ref($result);
+
+  #	my $ct=$result->{ct} || 'application/octet-stream';
+
+  #	if ($r->prev || $r->header_only) {
+  #		$r->content_type($ct);
+  #		$r->send_http_header;
+  #		return;
+  #	}
+  #	my $fh = Apache::gensym();
+  #	open($fh, $result->{file} || $r->filename()) || return http_code(NOT_FOUND);
+  #	$r->content_type($ct);
+  #	$r->send_http_header;
+  #	$r->send_fd($fh);
+  #	close($fh);
+
+  if ((my $rc=$r->discard_request_body)!=OK) {
+    return http_code($rc);
+  }
+	
+  if ($r->method_number==M_INVALID) {
+    $r->log->error("Invalid method in request",$r->the_request);
+    return http_code(NOT_IMPLEMENTED);
+  }
+	
+  if ($r->method_number==M_OPTIONS) {
+    return http_code(DECLINED);	#http_core.c:default_handler()willpickthisup
+  }
+	
+  if ($r->method_number==M_PUT) {
+    return http_code(HTTP_METHOD_NOT_ALLOWED);
+  }
+	
+  $r->filename($result->{file}) if $result->{file};
+	
+  unless(-e $r->finfo){
+    $r->log->error("File does not exist:",$r->filename);
+    return http_code(NOT_FOUND);
+  }
+  $r->content_type($r->lookup_file($r->filename)->content_type);
+  if ($r->method_number!=M_GET) {
+    return http_code(HTTP_METHOD_NOT_ALLOWED);
+  }
+	
+  my $fh=Apache::File->new($r->filename);
+  unless($fh){
+    $r->log->error("file permissions deny server access:",
+		   $r->filename);
+    return http_code(FORBIDDEN);
+  }
+  unless ($result->{nomtime}) {
+    $r->update_mtime(-s $r->finfo);
+    $r->set_last_modified;
+    $r->set_etag;
+		
+    if ((my $rc = $r->meets_conditions )!=OK) {
+      return http_code($rc);
+    }
+  }
+	
+  $r->set_content_length;
+  $r->send_http_header;
+	
+  unless($r->header_only){
+    $r->send_fd($fh);
+  }
+  close $fh;
+  return http_code();	
+}
+
+
+
+#####################################################################
+
+package awe::View_redirect;
+use strict;
+use awe::Context;
 use awe::Log;
 use Apache::Constants qw(:common REDIRECT BAD_REQUEST OK);
 
 sub show {
-	my ($template,$r,$data,$params)=@_;
-	if (my $original_request=$r->prev || $r->header_only) {
-		$r->content_type('text/html');
-		$r->send_http_header;
-		return 1;
-	}
-	
-	my $stylesheet;
-#	notice('input',$data->toString(),"\n\n");
-	foreach (@{$template->{templ}}) {
-		$stylesheet=xsltFile($_);
-		$data=$stylesheet->transform($data,%$params);
-#		notice("output ($_)",$data->toString(),"\n\n");
-	}
-	my $text=$stylesheet->output_string($data);
-	$r->content_type($stylesheet->media_type());
-	$r->send_http_header;
-	$r->print($text);
+  my($r,$template)=@_;
+
+  my $url=$template->{template}||fatal(24);
+  my $orig=$url;
+  foreach (split('\|',$url)) {
+    $_=uri()->home().$_
+      if /^\?/||/^[^\/:]+\//;
+    if ($_) {
+      s/\&/\?/
+	if !/\?/;
+      if (uri()->current() eq $_) {
+	warning(25);
+	$_=uri()->home();
+      }
+      $r->header_out(Location=>$url||fatal(24));
+    }
+  }
+
+  $url=~s/([=?]?)\$\{([a-zA-Z0-9_:]+)\}/_parseParam($1,$2)/ge;
+
+  fatal(24,$orig)
+    unless $url;
+  $r->header_out(Location=>$url);
+  return REDIRECT;
 }
 
+sub _parseParam {
+  my ($encode,$name)=@_;
+  my $value;
+  my $check_lp=0;
 
-package awe::View_redirect;
-use Apache::Constants qw(:common REDIRECT BAD_REQUEST OK);
-
-sub show {
-	my ($template,$r)=@_;
-	http_code(REDIRECT);
-	my $url=$template->{templ};
-	foreach (split('\|',$url)) {
-		$_=URIhome().$_
-			if /^\?/ || /^[^\/:]+\//;
-		if ($_) {
-			s/\&/\?/
-				if !/\?/;
-			if (URIcurrent() eq $_) {
-				warning(25);
-				$_=URIhome();
-			}
-			$r->header_out(Location => $url || fatal(24));
-		}
-	}
-	while ($url =~ /([=?]?)\$([a-zA-Z0-9_]+)/) {
-		my $encode=$1;
-		my $name=$2;
-		my $value;
-		my $check_lp=0;
-		if ($name eq 'referer') {
-			$check_lp=1;
-			$value=URIreferer();
-		} elsif ($name eq 'current') {
-			$check_lp=1;
-			$value=URIcurrent();
-		} elsif ($name eq 'home') {	
-			$value=URIhome();
-		} elsif ($name eq 'base') {	
-			$value=URIbase();
-		}
-		die 1;
-		#URI::Escape::uri_escape - кодирует все
-		$value=encode_uri($value) # кодирует не все, например оставляет &, кажется
-			if $encode;
-		if ($check_lp) {
-			$value=~s/[\&|\?]login=([^&]*)//;
-			$value=~s/[\&|\?]password=([^&]*)//;
-		}
-		$url =~ s/\$$name/$value/e;
-			
-	}
-	$r->header_out(Location => $url || fatal(24));
+  if ($name eq 'referer') {
+    $check_lp=1;
+    $value=uri()->referer();
+  } elsif ($name eq 'current') {
+    $check_lp=1;
+    $value=uri()->current();
+  } elsif ($name eq 'home') {	
+    $value=uri()->home();
+  } elsif ($name eq 'base') {	
+    $value=uri()->base();
+  } elsif ($name=~/^param:(.+)$/){
+    $value=param($1);
+  }
+  #URI::Escape::uri_escape-кодируетвсе
+  $value=encode_uri($value)	#кодируетневсе,напримероставляет&,кажется
+    if $encode;
+  if ($check_lp) {
+    #	die'checkloginandpasswordparameters';
+    #	$value=~s/[\&|\?]login=([^&]*)//;
+    #	$value=~s/[\&|\?]password=([^&]*)//;
+  }
+  return $value;
 }
 
 1;
 
 
+
+#suburlenc
+#{
+#my$self=shift;
+#my$s=shift;
+#$s=~s/([^\a-zA-Z0-9\.\*_-])/sprintf"%%%02X",ord$1/eg;
+#$s=~tr//+/;
+#return$s;
+#}

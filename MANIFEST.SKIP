@@ -13,3 +13,4 @@ bak$
 ^\#
 tar.bz2*
 makedistr
+^trash

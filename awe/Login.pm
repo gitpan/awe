@@ -1,190 +1,243 @@
 package awe::Login;
 use strict;
-use awe::Data;
+use Apache::Session::Generate::MD5;
+use awe::Context;
 use awe::Conf;
 use awe::Log;
 use awe::Db;
 use awe::Table;
-use Apache;
-use Apache::Cookie;
-use vars qw(@ISA
-						@EXPORT
-						$COOKIES
-						$USER_TABLE
-					 );
-@ISA = qw(Exporter);
-@EXPORT = qw(&handler);
+use awe::URI;
+use base qw(Exporter);
+use vars qw(
+	    @EXPORT
+	    %CONFIG
+	   );
 
-$COOKIES=undef;
-$USER_TABLE=undef;
+@EXPORT = qw(
+	     user
+	    );
 
-sub init {
-	$USER_TABLE=awe::Table->new('user');
-	$COOKIES = Apache::Cookie->fetch();
-}
+%CONFIG =
+  (
+   'login.fields' =>
+   {
+    login     => 'loginDate',   # last login date
+    counter   => 'counter',     # login counter
+    register  => 'registerDate', # registration date
+    anonymous => 'anonymous',   # anonymous flag
+    # Устанавливается при автогенерации пользователя. И означает
+    # что этот пользователь чисто сессионный и анонимный.
+   },
+   'login.cookie' =>
+   {
+    expires   => '+100d',
+    path      => '',
+   },
+	 
+   'login' =>
+   {
+    allowCGI  => 0, # Allow to login by CGI parameters
 
+    delete_anonymous_after_login => 1,
+    
+    # What we must to do if there is no defined login (user is anonymous).
+    #
+    # default - Load default user (there is user with login='' in database)
+    # session - Generate session user
+    #
+    # Otherwise it creates empty user's record.
+		
+    anonymous => 'session',
+   },
+	 
+   'tables.user' =>
+   {
+    table  => 'table_user',
+    attr	 => 'user_id:numeric login:char(50) name:char(200) passkey:char(50) counter:numeric anonymous:boolean registerDate:date loginDate:date',
+    id		 => 'user_id'
+   }
+  );
 
-sub deinit {
-	$USER_TABLE=undef;
-	$COOKIES = undef;
-}
+awe::Conf::addDefaultConfig(\%CONFIG);
 
-
-sub checkLogin {
-	my $p=param();
-	return login($p,2)
-		if exists $p->{login};
-	my %value=getCookieValue();
-	return login(\%value,1);
-}
-
-sub failed {
-	my $reason=shift;
-	my $hr=shift;
-	notice(105,$hr->{login},$reason);
-	outputSys({access=>{reason=>$reason,
-										 login=>$hr->{login}}});
-	return 0;
-}
-
-sub createSessionUser {
-	notice(104);
-	unless ($USER_TABLE->create({login=>generateLogin(),
-															 registerdate=>'now',
-															 passkey=>generateKey(),
-															 isanon=>1})) {
-		error(40);
-		generateEmptyUser();
-	}
-	doLogin(1);
-}
-
-sub generateEmptyUser {
-#	notice('generate empty user');
-}
-
-sub doLogin {
-	my $cookie=shift;
-	my ($loginDate,$counter)=(conf('login.loginDate'),conf('login.counter'));
-	if (($loginDate || $counter) && user('user_id')) {
-		my $res=1;
-		my @a;
-		push @a,"$counter=$counter+1" if $counter;
-		push @a,{$loginDate=>'now'}   if $loginDate;
-		notice(106,$USER_TABLE->modify(\@a));
-		COMMIT();
-	}
-	my $login=user('login');
-	setCookie({login    =>$login,
-						 password =>user('passkey'),
-						 anon     =>!user('isregistered')})
-		if $cookie;
-	outputSys({access=>{user=>user()}});
-	notice(107,$login);
-	return 1;
-}
-
-sub login {
-	my ($hr,$type)=@_;
-	
-	$hr={login=>'',password=>''}
-		unless $hr && $hr->{login};
-	$type+=0;
-	my @t=qw(internal cookie CGI);
-	my $anon=conf('login.anonymous');
-	
-	return createSessionUser() if $anon==2 && !$hr->{login};
-	# Если есть логин, или установлен режим загрузки безлогинового пользователя (такой должен быть в базе)
-	if ($hr->{login} || $anon==1) {
-		unless ($USER_TABLE->load({login=>$hr->{login}})) {
-			# Если включен режим автогенерации, логирующийся пользователь
-			# был автогенерирован и исользовал куки (если пользователь автогенерированный
-			# то он может логироваться только так), то сгенерироватьнового,
-			# иначе failed
-			return $anon==2 && $hr->{anon} && $type==1
-				? createSessionUser()
-					: failed('nouser',$hr);
-		}
-		if (user('passkey') ne $hr->{password}) {
-			# Тоже, что и выше. Хотя странно, почему пользователь есть, а пароль не подходит?
-			return $anon==2 && $hr->{anon} && $type==1
-				? createSessionUser()
-					: failed('wrong',$hr);
-		}
-		# Если включен режим авторегистрации, залогинившийся пользователь не авторегистрированный
-		# и он регистрируется не через куки, значет в куке возможно есть его старая запись
-		# авторегистрированного пользователя, попытаемся его удалить
-		if ($anon==2 && !user('isanon') && $type!=1) {
-			my %value=getCookieValue();
-			if ($value{login} && $value{anon}) {
-				notice(108,$value{login});
-				$USER_TABLE->delete({login  =>$value{login},
-														 passkey=>$value{password},
-														 isanon=>1})
-					|| warning(9,$value{login});
-			}
-		}
-	} else {
-		generateEmptyUser();
-	}
-	return doLogin($type!=1); 
-}
-
-sub generateLogin {
-	my $r=rand();
-	$r=~s/\.//;
-	$r=time().($r+0);
-	return unpack('h*',pack('c*',unpack('x3 a2 a2 a2 a2 a2 a2 a2 a2 a2 a2',$r)));
-}
-
-sub generateKey {
-	my $r=rand();
-	$r=~s/\.//;
-	$r+=0;
-	return $r;
+sub CheckLogin {
+  my $p=param();
+  return Login($p,2)
+    if conf('login.allowCGI') && exists $p->{login};
+  return Login(cookie()->get(),1);
 }
 
 sub user {
-	return $USER_TABLE->get(@_);
+  my $user =  context('user');
+  setContext('user',$user=awe::Table->new('user'))
+     unless $user;
+  return @_ ? $user->get(@_) : $user;
 }
 
-sub getCookieValue {
-	my $name=getCookieName();
-	return $COOKIES->{$name} ? decode($COOKIES->{$name}->value()) : undef;
+sub Failed {
+  my $reason=shift;
+  my $hr=shift;
+  user()->clear();
+  log_warn(105,$hr->{login},$reason);
+  setContext('access',{reason=>$reason,
+		       login=>$hr->{login}});
+  return 0;
 }
 
-sub getCookieName { return conf('cookie.name') || context('subsystem'); }
-
-sub decode {
-	my $str=unescape_uri(shift);
-	my %h;
-	foreach (split(':',$str)) {
-		if (/^(.+)=(.*)$/) {
-			$h{$1}=$2;
-		}
-	}
-	return %h;
+sub generateEmptyUser {
+  log_info('Generate Empty user');
 }
 
-sub encode {
-	my $str=shift;
-	return escape_uri(join(':',map {"$_=$str->{$_}"} keys %$str));
+# Делает запись о заходе пользователя в базу,
+# устанавливает при необходимости куку
+
+sub doLogin {
+  my $setCookie = shift;
+  my $login = user('login');
+  my ($loginDate,$counter)=(conf('login.fields.login'),conf('login.fields.counter'));
+  if (($loginDate || $counter) && user('user_id')) {
+    my @a;
+    push @a,"$counter=$counter+1" if $counter;
+    push @a,{$loginDate=>'now'}   if $loginDate;
+    dbTransaction {
+      user()->Modify(\@a);
+    };
+  }
+  if ($setCookie) {
+    my %hr=(login    =>$login,
+	    password =>user('passkey'));
+    my $anonymous=conf('login.fields.anonymous');
+    $hr{anonymous}=user($anonymous) if $anonymous;
+    cookie()->set(\%hr);
+    log_info('Set cookie:',join(',',%hr));
+  }
+  setContext('access',{user=>user()->get()});
+  log_info(107,$login);
+  return 1;
 }
 
-# Устанавливать куку на клиенте
+# $type:
+# 1 - login by cookie
+# 2 - login by CGI parameters
+# false - login by internal operation
 
-sub setCookie {
-	my $value = shift;
-	my $cookie = Apache::Cookie->
-		new(ar(),
-				-name    =>  getCookieName(),
-				-value   =>  encode($value),
-				-expires =>  conf('cookie.expiries') || '+3d',
-				# -domain  =>  conf('cookie.domain') || undef,
-				-path    =>  conf('cookie.path') || URIbaseLocation(),
-				# -secure  =>  conf('cookie.secure')
-			 );
-	$cookie->bake();
+sub Login {
+  my ($hr,$type)=@_;
+
+  $hr={login=>'',password=>''}
+    unless $hr && $hr->{login};
+  $type+=0;
+  my $anonConf=conf('login.anonymous');
+  my $anonymous=conf('login.fields.anonymous');
+  
+  return createSessionUser()
+    if $anonConf eq 'session' && !$hr->{login};
+	
+  # Если есть логин, или установлен режим загрузки дефолтного
+  # пользователя (такой должен быть в базе), продолжаем
+  log_info('There is user:',$hr->{login});
+  if ($hr->{login} || $anonConf eq 'default') {
+    my $where={login=>$hr->{login}};
+    $where->{$anonymous}=0
+      if $anonymous && $type != 1;
+    unless (user()->Load($where)) {
+      log_warn('No such user',$hr->{login});
+      # Такой пользователь не найден.
+      # Если не включен режим сессий (автогенерации), то вылетаем сразу.
+      
+      # Если режим автогенерации (сессии) включен и мы логируемы через
+      # куки и в куке есть параметр anonymous (только при таких условиях
+      # это настоящий сессионный пользователь), то сгенерируем его заново.
+      return createSessionUser() if $type==1 && $hr->{anonymous} && $anonConf eq 'session';
+      
+      # Иначе говорим, что такого пользователя нет.
+      return Failed('nouser',$hr);
+    }
+    if (user('passkey') ne $hr->{password}) {
+      log_warn('Bad password',$hr->{password},' must be ',user('passkey'));
+      # Тоже, что и выше. Хотя странно, почему пользователь есть, а пароль не подходит?
+      return createSessionUser() if $type==1 && $hr->{anonymous} && $anonConf eq 'session';
+      return Failed('wrong',$hr);
+    }
+    # Если включен режим авторегистрации и пользователь заходит на сайт не через
+    # куки, то возможно у него в куке осталась запись о сессионном
+    # пользователе (например он сначала зашел на сайт, сгенерировалась сессия, затем он
+    # залогировался), попытаемся удалить этого сессионного пользователя из базы.
+    # Естественно делаем это только если разрешено в конфиге
+    deleteSessionUser()
+      if conf('login.delete_anonymous_after_login') &&
+	$anonConf eq 'session' && $type!=1;
+    log_info('User is found and password is OK');
+  } else {
+    # Генерируем пустую записть для пользователя, так как
+    # режим генерации сессии и загрузки дефолтного юзера отключены
+    generateEmptyUser();
+  }
+  return doLogin($type!=1);
 }
+
+sub createSessionUser {
+#  log_info(104);
+  my %h=(login     =>generateSessionLogin(),
+	 passkey   =>generateSessionKey());
+
+  my $a=$h{passkey};
+  my $anonymous=conf('login.fields.anonymous');
+  $h{$anonymous}=1 if $anonymous;
+	
+  my $registerdate=conf('login.fields.register');
+  $h{$registerdate}='now'	if $registerdate;
+  log_info('create session user',join(',',map {"$_=$h{$_}"} keys %h));
+  fatal(40)
+    unless user()->Create(\%h);
+  dbCommit();
+  return doLogin(1);
+}
+
+sub deleteSessionUser {
+  my $anonymous=conf('login.fields.anonymous');
+  return unless $anonymous;
+  # Еще раз проверим не является ли залогиненый пользователь
+  # сессионный, хотя этого не может быть.
+  if (!user($anonymous)) {
+    my $value=cookie()->get();
+    if ($value->{login} && $value->{anonymous}) {
+      #			notice(108,$value{login});
+      user()->Delete({login  =>$value->{login},
+		      passkey=>$value->{password},
+		      $anonymous=>1})
+	|| log_warn(9,$value->{login});
+    }
+  } else {
+    log_warn(48);
+  }
+
+}
+
+sub generateSessionLogin { 	return Apache::Session::Generate::MD5::generate(); }
+sub generateSessionKey   { 	return Apache::Session::Generate::MD5::generate(); }
+
+=pod
+
+create table table_user (
+			 user_id   integer not null,
+			 name      varchar(200),
+			 login     varchar(50) not null unique,
+			 counter   integer default 0 not null,
+			 passkey   varchar(50),
+			 loginDate timestamp,
+			 registerDate timestamp,
+			 anonymous integer not null,
+
+			 primary key (user_id)
+			);
+
+create generator table_user_seq;
+
+insert into table_user values (0,'Administrator','admin',0,'supersecret','now','now',0);
+
+=cut
+
+
 
 1;

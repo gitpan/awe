@@ -1,109 +1,71 @@
 package awe::Log;
 use Exporter;
 use awe::Conf;
-use awe::Data;
+use awe::Context;
+use awe::Error;
+use Error;
 use Carp;
 use strict;
 use vars qw(@ISA
-						@EXPORT
-						$log_object
-						@ERRORS_LOG
-						$IS_ERROR_FATAL
-					 );
-
+	    @EXPORT
+	   );
 @ISA = qw(Exporter);
-@EXPORT = qw(fatal error debug notice warning info lastError getErrorLog);
+@EXPORT = qw(fatal
+	     log_notice
+	     log_info
+	     log_debug
+	     log_warn
+	    );
 
-$log_object='awe::Log::STDERR';
+# error debug notice warning info
 
-sub init {
-	my $log=shift;
-	$IS_ERROR_FATAL=0;
-	@ERRORS_LOG=();
-	return $awe::Log::log_object=$log;
-}
-
-sub deinit {
-	@ERRORS_LOG=();
-	$IS_ERROR_FATAL=0;
-	$log_object='awe::Log::STDERR';
-}
-
-sub getErrorLog {
-	return \@ERRORS_LOG;
-}
-
-sub isErrorFatal {
-	return $IS_ERROR_FATAL;
-}
-
-sub lastError {
-	return @ERRORS_LOG ? @ERRORS_LOG[@ERRORS_LOG] : undef ;
+sub getLogObject {
+  return awe::Context::apr() ? awe::Context::apr()->log() : 'awe::Log::STDERR';
 }
 
 sub fatal {
-	$IS_ERROR_FATAL=1;
-	my $s=getErrorMessage(@_);
-	push @ERRORS_LOG,$s;
-	# И та выведется через croak
-	$log_object->error($s);
-	croak $s;
+  my $error='awe::Error';
+  if ($_[0]=~/^Error(::.*)?$/ || $_[0]=~/^awe::Error/) {
+    $error=shift;
+  }
+  print STDERR "Error $error: ".join(',',@_)."\n";
+  throw $error @_;
 }
 
 sub error {
-	my $s=getErrorMessage(@_);
-	push @ERRORS_LOG,$s;
-	$log_object->error($s);
-	return undef;
+  getLogObject()->error(getMessage(@_));
+  return undef;
 }
 
-sub notice {
-	$log_object->notice(getMessage(@_));
-	return 0;
+sub log_notice {
+  getLogObject()->notice(getMessage(@_));
+}
+
+sub log_info {
+  getLogObject()->info(getMessage(@_));
+}
+
+sub log_debug {
+  getLogObject()->debug(getMessage(@_));
 }
 	
-sub debug {
-	$log_object->debug(getMessage(@_));
-	return 0;
+sub log_warn {
+  getLogObject()->warn(getMessage(@_));
 }
+	
 
-sub info {
-	$log_object->info(getMessage(@_));
-	return 0;
-}
-
-sub warning {
-	$log_object->warn(getMessage(@_));
-	return 0;
-}
 
 sub timemark {
-	notice(@_,time());
-	return 0;
+  notice(@_,time());
+  return 0;
 }
 
 sub getMessage {
-	if ($_[0]=~/^\d+$/) {
-		my $d=shift;
-		my $str=conf('messages',$d);
-		$str=~s/\$(\d+)/shift/eg;
-		$str=~s/\$([A-Z]+)/awe::Data::context($1)/egi;
-		$str.=' '.join(',',@_)
-			if @_;
-		return $str;
-	} else {
-		return join("\t",@_);		
-	}
-}
-
-sub getErrorMessage {
-	
-	if ($_[0]=~/^\d+$/) {
-		my $d=shift;
-		return "(code: $d) ".getMessage($d,@_);
-	} else {
-		return getMessage(@_);		
-	}
+  if ($_[0]=~/^\d+$/) {
+    return awe::Conf::getMessage(shift,@_);
+  } else {
+    return join("\t",@_);
+  }
 }
 
 
@@ -112,28 +74,28 @@ use strict;
 use awe::Log;
 
 sub notice {
-	my $self=shift;
-	print STDERR awe::Log::getMessage(@_)."\n";
+  my $self=shift;
+  print STDERR awe::Log::getMessage(@_)."\n";
 }
 	
 sub error {
-	my $self=shift;
-	print STDERR awe::Log::getErrorMessage(@_)."\n";
+  my $self=shift;
+  print STDERR awe::Log::getErrorMessage(@_)."\n";
 }
 
 sub debug {
-	my $self=shift;
-	print STDERR awe::Log::getMessage(@_)."\n";
+  my $self=shift;
+  print STDERR awe::Log::getMessage(@_)."\n";
 }
 
 sub info {
-	my $self=shift;
-	print STDERR awe::Log::getMessage(@_)."\n";
+  my $self=shift;
+  print STDERR awe::Log::getMessage(@_)."\n";
 }
 
 sub warn {
-	my $self=shift;
-	print STDERR awe::Log::getMessage(@_)."\n";
+  my $self=shift;
+  print STDERR awe::Log::getMessage(@_)."\n";
 }
 
 
